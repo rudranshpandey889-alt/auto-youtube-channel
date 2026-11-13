@@ -1,0 +1,64 @@
+
+name: YouTube OAuth Connection Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Google OAuth connection
+        env:
+          CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.parse
+          import urllib.request
+          import urllib.error
+          import sys
+
+          values = [
+              "CLIENT_ID",
+              "CLIENT_SECRET",
+              "REFRESH_TOKEN"
+          ]
+
+          if not all(os.environ.get(x) for x in values):
+              print("ERROR: One or more GitHub Secrets are missing.")
+              sys.exit(1)
+
+          data = urllib.parse.urlencode({
+              "client_id": os.environ["CLIENT_ID"],
+              "client_secret": os.environ["CLIENT_SECRET"],
+              "refresh_token": os.environ["REFRESH_TOKEN"],
+              "grant_type": "refresh_token"
+          }).encode()
+
+          request = urllib.request.Request(
+              "https://oauth2.googleapis.com/token",
+              data=data,
+              headers={"Content-Type": "application/x-www-form-urlencoded"}
+          )
+
+          try:
+              with urllib.request.urlopen(request) as response:
+                  result = json.loads(response.read())
+
+              if result.get("access_token"):
+                  print("SUCCESS: Google OAuth connection is working!")
+                  print("Token expiry:", result.get("expires_in"), "seconds")
+              else:
+                  print("ERROR: Google did not return an access token.")
+                  sys.exit(1)
+
+          except urllib.error.HTTPError as error:
+              print("Google OAuth returned HTTP error:", error.code)
+              print("Check OAuth credentials, refresh token and consent settings.")
+              sys.exit(1)
+          PY
