@@ -1,3 +1,4 @@
+
 name: AutoYT - Cinematic AI Video
 
 on:
@@ -15,29 +16,32 @@ concurrency:
 jobs:
   create-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
           python -m pip install --upgrade pip
           python -m pip install requests pillow edge-tts
 
-      - name: Generate scenes, voiceover and video
+      - name: Generate cinematic video
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          mkdir -p output
+          mkdir -p output/scenes
+
           cat > build_video.py <<'PY'
-          import os, json, time, base64, subprocess, math, wave, struct, textwrap
+          import os, json, time, base64, subprocess, math, wave, random
           from pathlib import Path
+          from array import array
+
           import requests
           from PIL import Image
 
@@ -45,65 +49,81 @@ jobs:
           SCENES = OUT / "scenes"
           SCENES.mkdir(parents=True, exist_ok=True)
 
-          OPENROUTER_KEY = os.environ["OPENROUTER_API_KEY"]
+          OR_KEY = os.environ["OPENROUTER_API_KEY"]
           CF_TOKEN = os.environ["CLOUDFLARE_API_TOKEN"]
           CF_ACCOUNT = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+
+          WIDTH, HEIGHT = 1920, 1080
+          FPS = 25
+          SCENE_COUNT = 24
+          SAMPLE_RATE = 22050
 
           def run(cmd):
               subprocess.run(cmd, check=True)
 
-          def get_duration(path):
-              value = subprocess.check_output([
-                  "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1", str(path)
+          def duration(path):
+              result = subprocess.check_output([
+                  "ffprobe", "-v", "error",
+                  "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1",
+                  str(path)
               ], text=True).strip()
-              return float(value)
+              return float(result)
 
-          def parse_json(text):
-              text = text.strip()
-              if text.startswith("```"):
-                  text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-              start, end = text.find("{"), text.rfind("}")
+          def parse_json(content):
+              content = content.strip()
+              if content.startswith("```"):
+                  content = content.split("\n", 1)[1].rsplit("```", 1)[0]
+              start, end = content.find("{"), content.rfind("}")
               if start < 0 or end < start:
-                  raise ValueError("The model did not return a JSON object.")
-              return json.loads(text[start:end + 1])
+                  raise ValueError("No JSON object returned")
+              return json.loads(content[start:end + 1])
 
+          # 1. Generate the complete story and 24 short visual shots.
           prompt = """
-          Create a high-retention YouTube explainer video concept for a general English-speaking audience.
-          Choose one compelling, evergreen topic from technology, gaming, science, psychology,
-          productivity or surprising everyday facts. Do not invent breaking news or unsupported claims.
-          Make it feel like a premium cinematic YouTube story, not a school presentation.
-          Return ONLY JSON with this exact structure:
+          Create a premium, high-retention YouTube documentary/explainer.
+          Choose one fascinating topic from GTA 6, gaming, AI, technology,
+          science, psychology, or surprising real-world facts.
+
+          Return ONLY valid JSON:
           {
-            "title": "curiosity-driven title, max 85 characters",
-            "description": "2-3 sentence YouTube description",
-            "tags": ["tag1", "tag2", "tag3"],
+            "title": "YouTube title, max 85 characters",
+            "description": "Interesting video description",
+            "tags": ["tag1", "tag2"],
             "scenes": [
               {
-                "narration": "natural spoken English, 45-65 words",
-                "visual": "specific cinematic image prompt, no text, no logos",
-                "caption": "short on-screen phrase, max 7 words"
+                "narration": "14 to 18 words of natural spoken English",
+                "visual": "Detailed cinematic image-generation prompt",
+                "caption": "Short on-screen caption, maximum 5 words"
               }
             ]
           }
-          Requirements:
-          - Exactly 6 scenes in a logical story.
-          - Scene 1 must have a powerful curiosity hook.
-          - Build tension or curiosity, then deliver a satisfying explanation.
-          - Narration must sound conversational, not academic.
-          - Visual prompts must describe different compositions and settings.
-          - Avoid graphic, dangerous or disturbing content.
-          - Never ask viewers to attempt dangerous challenges.
+
+          STRICT REQUIREMENTS:
+          - Exactly 24 scenes.
+          - Total narration should be around 340-430 words.
+          - Each scene narration must contain 14-18 words.
+          - Each scene should introduce a new visual moment.
+          - First scene must create a powerful curiosity hook.
+          - Build curiosity and tension, then deliver a satisfying payoff.
+          - Use conversational storytelling, not textbook language.
+          - Write punctuation and pauses naturally for voiceover.
+          - Make visual prompts photorealistic and cinematic.
+          - Use different camera compositions, environments and subjects.
+          - Do not put text, logos or watermarks inside image prompts.
+          - Never invent facts, statistics, quotes or breaking news.
+          - No graphic or dangerous content.
           """
 
           headers = {
-              "Authorization": "Bearer " + OPENROUTER_KEY,
+              "Authorization": "Bearer " + OR_KEY,
               "Content-Type": "application/json",
               "HTTP-Referer": "https://github.com",
               "X-Title": "AutoYT"
           }
 
           story = None
+
           for attempt in range(5):
               try:
                   response = requests.post(
@@ -113,86 +133,123 @@ jobs:
                           "model": "openrouter/free",
                           "messages": [{"role": "user", "content": prompt}],
                           "temperature": 0.85,
-                          "max_tokens": 6000,
-                          "stream": False
+                          "max_tokens": 10000
                       },
                       timeout=180
                   )
                   response.raise_for_status()
-                  choices = response.json().get("choices") or []
+
+                  choices = response.json().get("choices", [])
                   if not choices:
-                      raise ValueError("OpenRouter returned no choices.")
-                  content = (choices[0].get("message") or {}).get("content")
+                      raise ValueError("No model response")
+
+                  content = choices[0]["message"]["content"]
                   if isinstance(content, list):
                       content = "".join(
-                          x.get("text", "") for x in content if isinstance(x, dict)
+                          x.get("text", "") for x in content
+                          if isinstance(x, dict)
                       )
-                  if not isinstance(content, str) or not content.strip():
-                      raise ValueError("OpenRouter returned empty content.")
+
                   candidate = parse_json(content)
                   scenes = candidate.get("scenes")
-                  if not candidate.get("title") or not isinstance(scenes, list) or len(scenes) != 6:
-                      raise ValueError("Expected a title and exactly 6 scenes.")
+
+                  if not isinstance(scenes, list) or len(scenes) != SCENE_COUNT:
+                      raise ValueError("Model did not return 24 scenes")
+
                   for scene in scenes:
-                      for key in ("narration", "visual", "caption"):
-                          if not isinstance(scene.get(key), str) or not scene[key].strip():
-                              raise ValueError("Scene is missing " + key)
+                      for field in ("narration", "visual", "caption"):
+                          if not isinstance(scene.get(field), str) or not scene[field].strip():
+                              raise ValueError("Missing scene field: " + field)
+
                   story = candidate
                   break
+
               except Exception as exc:
-                  print(f"Script attempt {attempt + 1} failed: {exc}")
+                  print("Script attempt", attempt + 1, "failed:", exc)
                   if attempt == 4:
                       raise
-                  time.sleep(8)
+                  time.sleep(10)
 
           (OUT / "story.json").write_text(
-              json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8"
+              json.dumps(story, indent=2, ensure_ascii=False),
+              encoding="utf-8"
           )
-          print("Story:", story["title"])
 
+          print("VIDEO TOPIC:", story["title"])
+
+          # 2. Generate cinematic images through Cloudflare FLUX.
           def generate_image(scene_prompt, index):
               endpoint = (
                   "https://api.cloudflare.com/client/v4/accounts/"
-                  + CF_ACCOUNT + "/ai/run/@cf/black-forest-labs/flux-1-schnell"
+                  + CF_ACCOUNT
+                  + "/ai/run/@cf/black-forest-labs/flux-1-schnell"
               )
-              full_prompt = (
-                  "Cinematic photorealistic film still, widescreen 16:9 composition, "
-                  "professional cinematography, rich natural lighting, realistic detail. "
+
+              prompt_text = (
+                  "Premium cinematic photorealistic film still, "
+                  "wide 16:9 composition, professional movie lighting, "
+                  "high detail, dramatic atmosphere, realistic textures. "
                   + scene_prompt
-                  + " No words, no letters, no captions, no watermark, no logos."
+                  + " No text, no letters, no logos, no watermark."
               )
-              response = requests.post(
-                  endpoint,
-                  headers={"Authorization": "Bearer " + CF_TOKEN},
-                  json={"prompt": full_prompt, "steps": 4},
-                  timeout=240
-              )
-              if not response.ok:
-                  raise RuntimeError(
-                      f"Cloudflare image request failed ({response.status_code}): "
-                      + response.text[:1200]
-                  )
-              data = response.json()
-              encoded = ((data.get("result") or {}).get("image"))
-              if not encoded:
-                  raise RuntimeError("Cloudflare response did not contain result.image.")
-              raw = base64.b64decode(encoded)
-              temp = SCENES / f"raw_{index:02}.img"
-              temp.write_bytes(raw)
-              image = Image.open(temp).convert("RGB")
-              target_w, target_h = 1280, 720
-              scale = max(target_w / image.width, target_h / image.height)
-              image = image.resize(
-                  (round(image.width * scale), round(image.height * scale)),
-                  Image.Resampling.LANCZOS
-              )
-              left = (image.width - target_w) // 2
-              top = (image.height - target_h) // 2
-              image = image.crop((left, top, left + target_w, top + target_h))
-              path = SCENES / f"scene_{index:02}.jpg"
-              image.save(path, quality=94)
-              temp.unlink(missing_ok=True)
-              return path
+
+              for attempt in range(4):
+                  try:
+                      response = requests.post(
+                          endpoint,
+                          headers={
+                              "Authorization": "Bearer " + CF_TOKEN,
+                              "Accept": "image/png"
+                          },
+                          json={
+                              "prompt": prompt_text,
+                              "steps": 4
+                          },
+                          timeout=240
+                      )
+                      response.raise_for_status()
+
+                      if "json" in response.headers.get("Content-Type", ""):
+                          data = response.json()
+                          encoded = (data.get("result") or {}).get("image")
+                          if not encoded:
+                              raise ValueError("No image in Cloudflare JSON")
+                          raw = base64.b64decode(encoded)
+                      else:
+                          raw = response.content
+
+                      temp = SCENES / f"raw_{index:02}.img"
+                      temp.write_bytes(raw)
+
+                      image = Image.open(temp).convert("RGB")
+                      scale = max(WIDTH / image.width, HEIGHT / image.height)
+                      image = image.resize((
+                          round(image.width * scale),
+                          round(image.height * scale)
+                      ), Image.Resampling.LANCZOS)
+
+                      left = (image.width - WIDTH) // 2
+                      top = (image.height - HEIGHT) // 2
+                      image = image.crop((
+                          left, top, left + WIDTH, top + HEIGHT
+                      ))
+
+                      output = SCENES / f"image_{index:02}.jpg"
+                      image.save(output, quality=93)
+                      temp.unlink(missing_ok=True)
+                      return output
+
+                  except Exception as exc:
+                      print("Image attempt", attempt + 1, "failed:", exc)
+                      if attempt == 3:
+                          raise
+                      time.sleep(12 * (attempt + 1))
+
+          # 3. Generate voiceover, images, animated shots and captions.
+          clips = []
+          voice_files = []
+          subtitle_entries = []
+          timeline = 0.0
 
           def srt_time(seconds):
               ms = int(round(seconds * 1000))
@@ -201,128 +258,251 @@ jobs:
               s, ms = divmod(ms, 1000)
               return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
-          subtitles = []
-          clips = []
-          cursor = 0.0
-
           for i, scene in enumerate(story["scenes"], start=1):
-              print(f"Generating cinematic scene {i}/6")
-              image_path = generate_image(scene["visual"], i)
-              audio_path = SCENES / f"voice_{i:02}.mp3"
-              run([
-                  "edge-tts", "--voice", "en-US-AriaNeural", "--rate=-4%",
-                  "--text", scene["narration"], "--write-media", str(audio_path)
-              ])
-              audio_duration = get_duration(audio_path)
-              clip_duration = audio_duration + 0.35
+              print(f"Creating scene {i}/{SCENE_COUNT}")
 
-              words = scene["narration"].split()
-              chunks = [" ".join(words[j:j + 8]) for j in range(0, len(words), 8)]
-              for chunk_index, chunk in enumerate(chunks):
-                  start = cursor + audio_duration * chunk_index / len(chunks)
-                  end = cursor + audio_duration * (chunk_index + 1) / len(chunks)
-                  subtitles.append(
-                      f"{len(subtitles) + 1}\n{srt_time(start)} --> {srt_time(end)}\n{chunk}\n"
-                  )
+              image_path = generate_image(scene["visual"], i)
+
+              voice_path = SCENES / f"voice_{i:02}.mp3"
+
+              run([
+                  "edge-tts",
+                  "--voice", "en-US-AndrewNeural",
+                  "--rate=+2%",
+                  "--pitch=-2Hz",
+                  "--text", scene["narration"],
+                  "--write-media", str(voice_path)
+              ])
+
+              voice_duration = duration(voice_path)
+              padded_duration = voice_duration + 0.18
+
+              voice_files.append(voice_path)
+
+              subtitle_entries.append(
+                  f"{i}\n"
+                  f"{srt_time(timeline)} --> "
+                  f"{srt_time(timeline + voice_duration)}\n"
+                  f"{scene['caption']}\n"
+              )
 
               clip_path = SCENES / f"clip_{i:02}.mp4"
-              fade_out = max(0.0, clip_duration - 0.35)
-              vf = (
-                  "zoompan=z='min(zoom+0.0007,1.10)':"
-                  "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-                  "d=1:s=1280x720:fps=25,"
-                  "fade=t=in:st=0:d=0.35,"
-                  f"fade=t=out:st={fade_out:.3f}:d=0.35,"
+
+              # Alternate camera movement for visual variety.
+              if i % 2:
+                  zoom = (
+                      "zoompan=z='min(zoom+0.00065,1.10)':"
+                      "x='iw/2-(iw/zoom/2)':"
+                      "y='ih/2-(ih/zoom/2)'"
+                  )
+              else:
+                  zoom = (
+                      "zoompan=z='min(zoom+0.00065,1.10)':"
+                      "x='iw/2-(iw/zoom/2)':"
+                      "y='ih/2-(ih/zoom/2)'"
+                  )
+
+              fade_out = max(0, padded_duration - 0.30)
+
+              video_filter = (
+                  zoom + f":d=1:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                  "fade=t=in:st=0:d=0.25,"
+                  f"fade=t=out:st={fade_out:.3f}:d=0.30,"
                   "format=yuv420p"
               )
-              run([
-                  "ffmpeg", "-y", "-loop", "1", "-framerate", "25",
-                  "-i", str(image_path), "-i", str(audio_path),
-                  "-vf", vf, "-af", "apad",
-                  "-t", f"{clip_duration:.3f}",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                  "-pix_fmt", "yuv420p", "-r", "25",
-                  "-c:a", "aac", "-b:a", "160k", "-shortest", str(clip_path)
-              ])
-              clips.append(clip_path)
-              cursor += clip_duration
 
-          (OUT / "subtitles.srt").write_text(
-              "\n".join(subtitles), encoding="utf-8"
-          )
-          concat_file = OUT / "concat.txt"
-          concat_file.write_text(
-              "".join(f"file '{Path(p).resolve()}'\n" for p in clips),
+              run([
+                  "ffmpeg", "-y",
+                  "-loop", "1",
+                  "-framerate", str(FPS),
+                  "-i", str(image_path),
+                  "-vf", video_filter,
+                  "-t", f"{padded_duration:.3f}",
+                  "-an",
+                  "-c:v", "libx264",
+                  "-preset", "veryfast",
+                  "-crf", "21",
+                  "-pix_fmt", "yuv420p",
+                  "-r", str(FPS),
+                  str(clip_path)
+              ])
+
+              clips.append(clip_path)
+              timeline += padded_duration
+
+          # 4. Join all video shots.
+          video_list = OUT / "video_concat.txt"
+          video_list.write_text(
+              "".join(f"file '{p.resolve()}'\n" for p in clips),
               encoding="utf-8"
           )
-          joined = OUT / "joined.mp4"
+
+          joined_video = OUT / "joined_video.mp4"
+
           run([
-              "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i",
-              str(concat_file), "-c", "copy", str(joined)
+              "ffmpeg", "-y",
+              "-f", "concat", "-safe", "0",
+              "-i", str(video_list),
+              "-c:v", "libx264",
+              "-preset", "veryfast",
+              "-crf", "21",
+              "-pix_fmt", "yuv420p",
+              "-r", str(FPS),
+              str(joined_video)
           ])
 
-          # Generate a quiet, original ambient chord bed locally (no stock music).
-          music_path = OUT / "ambient.wav"
-          sample_rate = 22050
-          total_samples = int(cursor * sample_rate)
-          chords = [
-              [130.81, 164.81, 196.00, 261.63],
-              [110.00, 146.83, 174.61, 220.00],
-              [87.31, 130.81, 164.81, 196.00],
-              [98.00, 146.83, 196.00, 233.08]
-          ]
-          with wave.open(str(music_path), "wb") as wav:
-              wav.setnchannels(2)
-              wav.setsampwidth(2)
-              wav.setframerate(sample_rate)
-              chunk_size = sample_rate
-              for offset in range(0, total_samples, chunk_size):
-                  count = min(chunk_size, total_samples - offset)
-                  frames = bytearray()
-                  for n in range(count):
-                      t = (offset + n) / sample_rate
-                      chord = chords[int(t // 14) % len(chords)]
-                      envelope = min(1.0, t / 3.0, max(0.0, (cursor - t) / 4.0))
-                      value = 0.0
-                      for k, frequency in enumerate(chord):
-                          value += math.sin(2 * math.pi * frequency * t) * (0.0025 / (k + 1))
-                      value *= envelope
-                      sample = max(-32767, min(32767, int(value * 32767)))
-                      frames.extend(struct.pack("<hh", sample, sample))
-                  wav.writeframes(frames)
-
-          final_path = OUT / "final_video.mp4"
-          subtitle_filter = (
-              "subtitles=output/subtitles.srt:"
-              "force_style='FontName=DejaVu Sans,FontSize=20,"
-              "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-              "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=42'"
+          # 5. Join all voiceover segments.
+          voice_list = OUT / "voice_concat.txt"
+          voice_list.write_text(
+              "".join(f"file '{p.resolve()}'\n" for p in voice_files),
+              encoding="utf-8"
           )
+
+          voice_track = OUT / "voice.mp3"
+
           run([
-              "ffmpeg", "-y", "-i", str(joined), "-i", str(music_path),
+              "ffmpeg", "-y",
+              "-f", "concat", "-safe", "0",
+              "-i", str(voice_list),
+              "-c:a", "libmp3lame",
+              "-q:a", "3",
+              str(voice_track)
+          ])
+
+          # 6. Create original ambient music and transition sound effects.
+          def create_audio_beds(total_duration):
+              total = int((total_duration + 1) * SAMPLE_RATE)
+              music = array("h")
+              effects = array("h")
+
+              random.seed(42)
+
+              chords = [
+                  [130.81, 164.81, 196.00, 261.63],
+                  [110.00, 146.83, 174.61, 220.00],
+                  [87.31, 130.81, 164.81, 196.00],
+                  [98.00, 146.83, 196.00, 233.08]
+              ]
+
+              boundaries = []
+              t = 0.0
+              for p in voice_files[:-1]:
+                  t += duration(p) + 0.18
+                  boundaries.append(t)
+
+              for n in range(total):
+                  t = n / SAMPLE_RATE
+                  chord = chords[int(t // 12) % len(chords)]
+
+                  envelope = min(
+                      1.0,
+                      t / 2.5,
+                      max(0.0, (total_duration - t) / 3.0)
+                  )
+
+                  music_value = 0.0
+                  for k, frequency in enumerate(chord):
+                      music_value += (
+                          math.sin(2 * math.pi * frequency * t)
+                          * (0.035 / (k + 1))
+                      )
+
+                  music_value *= envelope
+                  music.append(max(-32767, min(
+                      32767, int(music_value * 32767)
+                  )))
+
+                  effect_value = 0.0
+
+                  for boundary in boundaries:
+                      elapsed = t - boundary
+                      if 0 <= elapsed < 0.55:
+                          env = (1 - elapsed / 0.55) ** 2
+                          noise = random.uniform(-1, 1)
+                          low = math.sin(2 * math.pi * 65 * elapsed)
+                          effect_value += (noise * 0.16 + low * 0.12) * env
+                          break
+
+                  effects.append(max(-32767, min(
+                      32767, int(effect_value * 32767)
+                  )))
+
+              for name, samples in (
+                  ("background_music.wav", music),
+                  ("sound_effects.wav", effects)
+              ):
+                  with wave.open(str(OUT / name), "wb") as wav:
+                      wav.setnchannels(1)
+                      wav.setsampwidth(2)
+                      wav.setframerate(SAMPLE_RATE)
+                      wav.writeframes(samples.tobytes())
+
+          create_audio_beds(timeline)
+
+          # 7. Create scene captions.
+          captions_path = OUT / "captions.srt"
+          captions_path.write_text(
+              "\n".join(subtitle_entries),
+              encoding="utf-8"
+          )
+
+          # 8. Mix voice, music and sound effects.
+          final_path = OUT / "final_video.mp4"
+
+          subtitle_filter = (
+              "subtitles=output/captions.srt:"
+              "force_style='FontName=DejaVu Sans,"
+              "FontSize=27,PrimaryColour=&H00FFFFFF,"
+              "OutlineColour=&H00000000,BorderStyle=1,"
+              "Outline=3,Shadow=1,Alignment=2,MarginV=65'"
+          )
+
+          run([
+              "ffmpeg", "-y",
+              "-i", str(joined_video),
+              "-i", str(voice_track),
+              "-i", str(OUT / "background_music.wav"),
+              "-i", str(OUT / "sound_effects.wav"),
               "-vf", subtitle_filter,
               "-filter_complex",
-              "[0:a]volume=1.0[voice];[1:a]volume=0.22[music];"
-              "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
-              "-map", "0:v", "-map", "[a]",
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-              "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-              "-movflags", "+faststart", str(final_path)
+              "[1:a]volume=1.0[voice];"
+              "[2:a]volume=0.22[music];"
+              "[3:a]volume=0.35[sfx];"
+              "[voice][music][sfx]"
+              "amix=inputs=3:duration=first:dropout_transition=2[a]",
+              "-map", "0:v",
+              "-map", "[a]",
+              "-c:v", "libx264",
+              "-preset", "veryfast",
+              "-crf", "21",
+              "-pix_fmt", "yuv420p",
+              "-c:a", "aac",
+              "-b:a", "192k",
+              "-movflags", "+faststart",
+              str(final_path)
           ])
 
-          (OUT / "video_title.txt").write_text(story["title"], encoding="utf-8")
-          description = story.get("description", "A cinematic story from AutoYT.")
-          tags = story.get("tags", [])
+          # 9. Save YouTube metadata.
           metadata = {
               "title": story["title"][:100],
-              "description": description[:4900] + "\n\nCreated with AutoYT.",
-              "tags": [str(t)[:30] for t in tags[:15]],
+              "description": (
+                  story.get("description", "")
+                  + "\n\nCreated with AutoYT."
+              )[:4900],
+              "tags": [
+                  str(tag)[:30] for tag in story.get("tags", [])[:15]
+              ],
               "categoryId": "28"
           }
+
           (OUT / "youtube_metadata.json").write_text(
-              json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+              json.dumps(metadata, ensure_ascii=False, indent=2),
+              encoding="utf-8"
           )
-          print("VIDEO READY:", final_path, "duration:", round(get_duration(final_path), 1))
+
+          print("VIDEO READY:", final_path)
+          print("DURATION:", round(duration(final_path), 1), "seconds")
+          print("SCENES:", len(clips))
           PY
 
           python build_video.py
@@ -342,10 +522,11 @@ jobs:
               "YOUTUBE_CLIENT_SECRET",
               "YOUTUBE_REFRESH_TOKEN"
           ]
-          if not all(os.environ.get(k) for k in required):
-              raise SystemExit("One or more YouTube OAuth secrets are missing.")
 
-          token_response = requests.post(
+          if not all(os.environ.get(k) for k in required):
+              raise SystemExit("Missing YouTube OAuth secrets")
+
+          token = requests.post(
               "https://oauth2.googleapis.com/token",
               data={
                   "client_id": os.environ["YOUTUBE_CLIENT_ID"],
@@ -355,62 +536,64 @@ jobs:
               },
               timeout=60
           )
-          token_response.raise_for_status()
-          access_token = token_response.json()["access_token"]
+          token.raise_for_status()
+          access_token = token.json()["access_token"]
 
           metadata = json.loads(
-              Path("output/youtube_metadata.json").read_text(encoding="utf-8")
+              Path("output/youtube_metadata.json").read_text()
           )
+
           metadata["status"] = {
-              "privacyStatus": "private",
-              "selfDeclaredMadeForKids": False
+              "privacyStatus": "private"
           }
 
-          video_path = Path("output/final_video.mp4")
-          size = video_path.stat().st_size
-          headers = {
-              "Authorization": "Bearer " + access_token,
-              "Content-Type": "application/json; charset=UTF-8",
-              "X-Upload-Content-Type": "video/mp4",
-              "X-Upload-Content-Length": str(size)
-          }
+          video = Path("output/final_video.mp4")
+          size = video.stat().st_size
+
           start = requests.post(
               "https://www.googleapis.com/upload/youtube/v3/videos"
               "?uploadType=resumable&part=snippet,status",
-              headers=headers,
+              headers={
+                  "Authorization": "Bearer " + access_token,
+                  "Content-Type": "application/json; charset=UTF-8",
+                  "X-Upload-Content-Type": "video/mp4",
+                  "X-Upload-Content-Length": str(size)
+              },
               json={
                   "snippet": {
                       "title": metadata["title"],
                       "description": metadata["description"],
-                      "tags": metadata.get("tags", []),
-                      "categoryId": metadata.get("categoryId", "28")
+                      "tags": metadata["tags"],
+                      "categoryId": metadata["categoryId"]
                   },
                   "status": metadata["status"]
               },
               timeout=60
           )
           start.raise_for_status()
+
           upload_url = start.headers.get("Location")
           if not upload_url:
-              raise RuntimeError("YouTube did not return a resumable upload URL.")
+              raise RuntimeError("YouTube did not return upload URL")
 
-          with video_path.open("rb") as video_file:
-              upload = requests.put(
+          with video.open("rb") as file:
+              result = requests.put(
                   upload_url,
-                  data=video_file,
+                  data=file,
                   headers={"Content-Type": "video/mp4"},
                   timeout=1800
               )
-          upload.raise_for_status()
-          result = upload.json()
-          print("YOUTUBE UPLOAD COMPLETE. Video ID:", result.get("id"))
-          print("Privacy status: private (review before publishing).")
+
+          result.raise_for_status()
+          print("UPLOAD SUCCESSFUL")
+          print("VIDEO ID:", result.json().get("id"))
+          print("PRIVACY: PRIVATE")
           PY
 
-      - name: Save generated video and assets
+      - name: Save video and assets
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: autoyt-video-and-assets
+          name: autoyt-cinematic-video
           path: output/
           retention-days: 7
