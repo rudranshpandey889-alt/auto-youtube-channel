@@ -16,7 +16,7 @@ permissions:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Generate cinematic video blueprint
@@ -37,31 +37,30 @@ jobs:
           topic = os.environ.get("VIDEO_TOPIC", "").strip()
 
           if not key:
-              sys.exit("OPENROUTER_API_KEY is missing")
+              sys.exit("ERROR: OPENROUTER_API_KEY is missing.")
 
           if topic:
               topic_instruction = f"Create a video about: {topic}"
           else:
               topic_instruction = """
-              Choose a fresh, original, highly engaging video concept.
-              Do not choose a generic facts-list topic.
+              Invent a fresh, original, highly engaging cinematic video concept.
+              Avoid generic facts-list videos.
               """
 
           prompt = f"""
-          You are a professional cinematic documentary writer
-          and visual director.
+          You are a professional cinematic documentary writer and visual director.
 
           {topic_instruction}
 
-          Create a complete 5-7 minute video blueprint.
+          Create a complete 5-7 minute cinematic video blueprint.
 
-          QUALITY REQUIREMENTS:
-          - Premium cinematic documentary presentation.
-          - Photorealistic visual direction.
+          QUALITY:
+          - Premium cinematic documentary storytelling.
+          - Photorealistic visual descriptions.
           - Detailed environments, lighting and atmosphere.
           - Smooth camera movements and varied compositions.
-          - Strong storytelling and suspense.
-          - Natural narration, not robotic or repetitive.
+          - Strong suspense, pacing and narrative progression.
+          - Natural, engaging narration.
           - No graphic violence or dangerous real-world instructions.
 
           FORMAT:
@@ -73,21 +72,22 @@ jobs:
 
           # SCENE BREAKDOWN
 
-          Create 10-14 scenes. For EACH scene include:
-          1. Scene number and estimated duration.
+          Create 10-14 scenes.
+
+          For every scene provide:
+          1. Scene number and duration.
           2. Exact narration.
           3. Detailed cinematic visual prompt.
           4. Camera angle and movement.
-          5. Lighting, atmosphere and environment.
-          6. Background music or sound-effect cues.
-          7. Transition to the next scene.
+          5. Lighting and atmosphere.
+          6. Music and sound effects.
+          7. Transition instructions.
 
           # THUMBNAIL CONCEPT
           # MUSIC DIRECTION
-          # FINAL ENDING AND SUBSCRIBE LINE
+          # FINAL ENDING
 
-          Make the story coherent and original.
-          Do not refer to these instructions.
+          Make the story original, coherent and engaging.
           """
 
           payload = {
@@ -98,16 +98,22 @@ jobs:
                       "content": prompt
                   }
               ],
-              "max_tokens": 6000,
-              "temperature": 0.8
+              "max_tokens": 12000,
+              "temperature": 0.8,
+              "reasoning": {
+                  "effort": "low",
+                  "exclude": True
+              }
           }
 
           request = urllib.request.Request(
               "https://openrouter.ai/api/v1/chat/completions",
-              data=json.dumps(payload).encode(),
+              data=json.dumps(payload).encode("utf-8"),
               headers={
                   "Authorization": f"Bearer {key}",
-                  "Content-Type": "application/json"
+                  "Content-Type": "application/json",
+                  "HTTP-Referer": "https://github.com",
+                  "X-Title": "AutoYT"
               },
               method="POST"
           )
@@ -116,24 +122,45 @@ jobs:
               with urllib.request.urlopen(request, timeout=240) as response:
                   result = json.loads(response.read())
 
-              content = result["choices"][0]["message"]["content"]
+              choice = result["choices"][0]
+              message = choice.get("message", {})
+              content = message.get("content")
 
-              if not content or not content.strip():
-                  sys.exit("ERROR: Model returned an empty script.")
+              print("Selected model:", result.get("model"))
+              print("Finish reason:", choice.get("finish_reason"))
+              print("Usage:", result.get("usage"))
 
-              with open("output/video_blueprint.md", "w", encoding="utf-8") as f:
-                  f.write(content)
+              if isinstance(content, list):
+                  content = "\n".join(
+                      item.get("text", "")
+                      for item in content
+                      if isinstance(item, dict)
+                  )
+
+              if not isinstance(content, str) or not content.strip():
+                  print("Response details:")
+                  print(json.dumps(result, indent=2)[:5000])
+                  sys.exit("ERROR: OpenRouter returned empty content.")
+
+              os.makedirs("output", exist_ok=True)
+
+              with open(
+                  "output/video_blueprint.md",
+                  "w",
+                  encoding="utf-8"
+              ) as file:
+                  file.write(content)
 
               print("VIDEO BLUEPRINT GENERATED SUCCESSFULLY")
               print("Characters:", len(content))
 
           except urllib.error.HTTPError as error:
               print("API ERROR:", error.code)
-              print(error.read().decode()[:2000])
+              print(error.read().decode()[:3000])
               sys.exit(1)
 
           except Exception as error:
-              print("ERROR:", str(error))
+              print("ERROR:", repr(error))
               sys.exit(1)
           PY
 
