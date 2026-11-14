@@ -58,7 +58,14 @@ jobs:
                   sys.exit(1)
 
           except urllib.error.HTTPError as error:
-              print("Google OAuth returned HTTP error:", error.code)
-              print("Check OAuth credentials, refresh token and consent settings.")
-              sys.exit(1)
+    print("Google OAuth HTTP error:", error.code)
+
+    try:
+        details = json.loads(error.read().decode())
+        print("Google error:", details.get("error", "unknown"))
+        print("Description:", details.get("error_description", "Not provided"))
+    except Exception:
+        print("Could not read Google's error details.")
+
+    sys.exit(1)
           PY
