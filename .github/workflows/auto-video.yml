@@ -1,216 +1,125 @@
 
-name: AutoYT - Generate Video
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 12 * * *"
-
-permissions:
-  contents: read
-
-jobs:
-  create-video:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng
-          python -m pip install --upgrade pip pillow requests
-
       - name: Generate video script
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           mkdir -p output
           python - <<'PY'
-          import os, json, requests
+          import os, json, requests, time
 
           prompt = """
-          Create an original short cinematic documentary-style YouTube video.
-          Return ONLY valid JSON with this structure:
+          Create an original, engaging YouTube documentary script.
+          Return ONLY valid JSON:
           {
             "title": "video title",
             "scenes": [
               {
-                "narration": "70 to 100 words of narration",
-                "visual": "short visual description",
-                "caption": "short on-screen caption"
+                "narration": "70 to 100 words",
+                "visual": "visual description",
+                "caption": "short caption"
               }
             ]
           }
           Create exactly 8 scenes.
-          Choose an interesting educational mystery, science, history,
-          nature or technology topic. Do not use graphic violence.
-          Make the narration engaging, factual and original.
+          Choose an interesting science, history, nature,
+          mystery or technology topic.
+          Keep it factual, cinematic and original.
+          No graphic violence.
           """
 
-          response = requests.post(
-              "https://openrouter.ai/api/v1/chat/completions",
-              headers={
-                  "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
-                  "Content-Type": "application/json"
-              },
-              json={
-                  "model": "openrouter/free",
-                  "messages": [{"role": "user", "content": prompt}],
-                  "temperature": 0.8,
-                  "max_tokens": 7000,
-                  "reasoning": {"effort": "low", "exclude": True}
-              },
-              timeout=180
-          )
-          response.raise_for_status()
-          content = response.json()["choices"][0]["message"]["content"]
+          headers = {
+              "Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"],
+              "Content-Type": "application/json",
+              "HTTP-Referer": "https://github.com",
+              "X-Title": "AutoYT"
+          }
 
-          if isinstance(content, list):
-              content = "".join(
-                  x.get("text", "") for x in content
-                  if isinstance(x, dict)
+          data = None
+
+          for attempt in range(5):
+              print(f"Generation attempt {attempt + 1}/5")
+
+              try:
+                  response = requests.post(
+                      "https://openrouter.ai/api/v1/chat/completions",
+                      headers=headers,
+                      json={
+                          "model": "openrouter/free",
+                          "messages": [
+                              {"role": "user", "content": prompt}
+                          ],
+                          "temperature": 0.7,
+                          "max_tokens": 7000,
+                          "stream": False,
+                          "reasoning": {
+                              "effort": "low",
+                              "exclude": True
+                          }
+                      },
+                      timeout=180
+                  )
+
+                  response.raise_for_status()
+                  result = response.json()
+
+                  choices = result.get("choices") or []
+                  if not choices:
+                      raise ValueError("No choices returned: " +
+                                       json.dumps(result)[:1000])
+
+                  message = choices[0].get("message") or {}
+                  content = message.get("content")
+
+                  if isinstance(content, list):
+                      content = "".join(
+                          item.get("text", "")
+                          for item in content
+                          if isinstance(item, dict)
+                      )
+
+                  if not isinstance(content, str) or not content.strip():
+                      raise ValueError(
+                          "Model returned empty content. Finish reason: " +
+                          str(choices[0].get("finish_reason"))
+                      )
+
+                  content = content.strip()
+
+                  if content.startswith("```"):
+                      content = content.split("\n", 1)[1]
+                      content = content.rsplit("```", 1)[0].strip()
+
+                  parsed = json.loads(content)
+
+                  if not isinstance(parsed.get("scenes"), list):
+                      raise ValueError("Missing scenes array")
+
+                  if len(parsed["scenes"]) != 8:
+                      raise ValueError("Expected exactly 8 scenes")
+
+                  if not parsed.get("title"):
+                      raise ValueError("Missing video title")
+
+                  for scene in parsed["scenes"]:
+                      for field in ("narration", "visual", "caption"):
+                          if not isinstance(scene.get(field), str) or not scene[field].strip():
+                              raise ValueError("Missing scene field: " + field)
+
+                  data = parsed
+                  break
+
+              except Exception as error:
+                  print("Attempt failed:", str(error)[:1000])
+                  if attempt < 4:
+                      time.sleep(10)
+
+          if data is None:
+              raise RuntimeError(
+                  "Could not generate a valid script after 5 attempts."
               )
-
-          content = content.strip()
-          if content.startswith("```"):
-              content = content.split("\n", 1)[1].rsplit("```", 1)[0]
-
-          data = json.loads(content)
-          if len(data.get("scenes", [])) != 8:
-              raise ValueError("Expected exactly 8 scenes")
 
           with open("output/story.json", "w", encoding="utf-8") as f:
               json.dump(data, f, ensure_ascii=False, indent=2)
 
-          print("Script generated:", data["title"])
+          print("SCRIPT GENERATED:", data["title"])
           PY
-
-      - name: Create narrated video
-        run: |
-          python - <<'PY'
-          import json, os, subprocess, textwrap
-          from PIL import Image, ImageDraw, ImageFont
-
-          W, H = 1280, 720
-          os.makedirs("output/scenes", exist_ok=True)
-
-          with open("output/story.json", encoding="utf-8") as f:
-              story = json.load(f)
-
-          try:
-              font_title = ImageFont.truetype(
-                  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58
-              )
-              font_body = ImageFont.truetype(
-                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30
-              )
-          except:
-              font_title = font_body = ImageFont.load_default()
-
-          clips = []
-
-          for i, scene in enumerate(story["scenes"]):
-              image = Image.new("RGB", (W, H), (12, 20, 38))
-              draw = ImageDraw.Draw(image)
-
-              # Create a layered abstract background.
-              for y in range(H):
-                  t = y / H
-                  color = (
-                      int(10 + 18*t),
-                      int(18 + 22*t),
-                      int(38 + 35*t)
-                  )
-                  draw.line((0, y, W, y), fill=color)
-
-              # Decorative cinematic light shapes.
-              draw.ellipse((780, -180, 1450, 500), fill=(25, 55, 85))
-              draw.ellipse((-250, 420, 500, 1100), fill=(20, 42, 68))
-              draw.rectangle((70, 75, 78, 645), fill=(90, 190, 220))
-
-              draw.text((115, 90), story["title"][:65],
-                        font=font_title, fill="white")
-
-              caption = scene.get("caption", "")
-              lines = textwrap.wrap(caption, width=38)
-              y = 300
-              for line in lines[:3]:
-                  draw.text((115, y), line, font=font_body,
-                            fill=(180, 225, 245))
-                  y += 48
-
-              visual = scene.get("visual", "")
-              for j, line in enumerate(textwrap.wrap(visual, width=75)[:2]):
-                  draw.text((115, 570 + j*32), line,
-                            font=font_body, fill=(190, 195, 205))
-
-              img_path = f"output/scenes/scene_{i:02}.png"
-              image.save(img_path)
-
-              narration = scene["narration"]
-              txt_path = f"output/scenes/voice_{i:02}.txt"
-              wav_path = f"output/scenes/voice_{i:02}.wav"
-
-              with open(txt_path, "w", encoding="utf-8") as f:
-                  f.write(narration)
-
-              subprocess.run([
-                  "espeak-ng", "-v", "en-us",
-                  "-s", "145", "-f", txt_path, "-w", wav_path
-              ], check=True)
-
-              duration = float(subprocess.check_output([
-                  "ffprobe", "-v", "error",
-                  "-show_entries", "format=duration",
-                  "-of", "default=noprint_wrappers=1:nokey=1",
-                  wav_path
-              ]).decode().strip()) + 1.5
-
-              clip_path = f"output/scenes/clip_{i:02}.mp4"
-              frames = int(duration * 25)
-
-              subprocess.run([
-                  "ffmpeg", "-y",
-                  "-loop", "1", "-i", img_path,
-                  "-i", wav_path,
-                  "-vf",
-                  f"scale=1600:900,zoompan=z='min(zoom+0.0005,1.12)':"
-                  f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-                  f"d={frames}:s=1280x720:fps=25,format=yuv420p",
-                  "-af", "apad",
-                  "-t", str(duration),
-                  "-c:v", "libx264", "-preset", "ultrafast",
-                  "-c:a", "aac", "-b:a", "128k",
-                  "-shortest", clip_path
-              ], check=True)
-
-              clips.append(clip_path)
-              print("Created scene", i + 1)
-
-          with open("output/concat.txt", "w") as f:
-              for clip in clips:
-                  f.write("file '" + os.path.abspath(clip) + "'\n")
-
-          subprocess.run([
-              "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-              "-i", "output/concat.txt",
-              "-c", "copy", "-movflags", "+faststart",
-              "output/final_video.mp4"
-          ], check=True)
-
-          with open("output/video_title.txt", "w", encoding="utf-8") as f:
-              f.write(story["title"])
-
-          print("VIDEO CREATED")
-          PY
-
-      - name: Upload finished video
-        uses: actions/upload-artifact@v4
-        with:
-          name: auto-generated-video
-          path: output/
-          retention-days: 7
