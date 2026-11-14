@@ -1,0 +1,63 @@
+
+name: YouTube Channel Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify YouTube Channel
+        env:
+          CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.parse
+          import urllib.request
+
+          data = urllib.parse.urlencode({
+              "client_id": os.environ["CLIENT_ID"],
+              "client_secret": os.environ["CLIENT_SECRET"],
+              "refresh_token": os.environ["REFRESH_TOKEN"],
+              "grant_type": "refresh_token"
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://oauth2.googleapis.com/token",
+              data=data
+          )
+
+          with urllib.request.urlopen(req) as r:
+              token = json.loads(r.read())["access_token"]
+
+          req = urllib.request.Request(
+              "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+              headers={"Authorization": "Bearer " + token}
+          )
+
+          with urllib.request.urlopen(req) as r:
+              result = json.loads(r.read())
+
+          if not result.get("items"):
+              print("ERROR: No YouTube channel found.")
+              raise SystemExit(1)
+
+          channel = result["items"][0]["snippet"]
+          print("SUCCESS: YouTube channel connected!")
+          print("Channel title:", channel["title"])
+          print("Channel verification complete.")
+          PY
