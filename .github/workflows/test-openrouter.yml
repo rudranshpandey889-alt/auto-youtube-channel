@@ -1,0 +1,66 @@
+
+name: Test OpenRouter
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test free AI model
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+          import sys
+
+          key = os.environ.get("OPENROUTER_API_KEY")
+
+          if not key:
+              sys.exit("ERROR: OPENROUTER_API_KEY is missing.")
+
+          payload = {
+              "model": "openrouter/free",
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "Reply with exactly: OPENROUTER CONNECTION SUCCESS"
+                  }
+              ],
+              "max_tokens": 40
+          }
+
+          request = urllib.request.Request(
+              "https://openrouter.ai/api/v1/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Authorization": f"Bearer {key}",
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  result = json.loads(response.read())
+                  print(result["choices"][0]["message"]["content"])
+                  print("OPENROUTER TEST PASSED")
+
+          except urllib.error.HTTPError as error:
+              print("API ERROR:", error.code)
+              print(error.read().decode()[:1500])
+              sys.exit(1)
+
+          except Exception as error:
+              print("ERROR:", str(error))
+              sys.exit(1)
+          PY
