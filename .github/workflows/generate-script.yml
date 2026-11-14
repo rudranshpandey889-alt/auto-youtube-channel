@@ -1,0 +1,88 @@
+
+name: Generate AI Video Script
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Enter your video topic"
+        required: true
+        default: "Why people hate their jobs"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Gemini SDK
+        run: pip install google-genai
+
+      - name: Generate script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VIDEO_TOPIC: ${{ inputs.topic }}
+        run: |
+          python - <<'PY'
+          import os
+          from google import genai
+
+          client = genai.Client(
+              api_key=os.environ["GEMINI_API_KEY"]
+          )
+
+          topic = os.environ["VIDEO_TOPIC"]
+
+          prompt = f"""
+          Create a high-quality YouTube video script about: {topic}
+
+          Format:
+          1. Attention-grabbing opening hook
+          2. Introduction
+          3. Main story in 6-8 sections
+          4. Interesting facts and examples
+          5. Strong conclusion
+          6. Call to action
+
+          Style:
+          - English language
+          - Engaging documentary narration
+          - Cinematic storytelling
+          - Suitable for stickman animation,
+            infographic and motion graphics
+          - Natural human-like narration
+          - No fabricated facts
+          - Include visual suggestions for every section
+
+          Target length: 4-6 minutes.
+          """
+
+          response = client.models.generate_content(
+              model="gemini-3.8-flash",
+              contents=prompt
+          )
+
+          script = response.text
+
+          if not script:
+              raise Exception("No script generated")
+
+          with open("video-script.md", "w", encoding="utf-8") as f:
+              f.write("# " + topic + "\n\n")
+              f.write(script)
+
+          print("SCRIPT GENERATED SUCCESSFULLY")
+          PY
+
+      - name: Save generated script
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-video-script
+          path: video-script.md
