@@ -1,0 +1,146 @@
+
+name: Generate Cinematic Video Script
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Leave blank for an automatically selected topic"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Generate cinematic video blueprint
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          VIDEO_TOPIC: ${{ inputs.topic }}
+        run: |
+          mkdir -p output
+
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+          import sys
+
+          key = os.environ.get("OPENROUTER_API_KEY")
+          topic = os.environ.get("VIDEO_TOPIC", "").strip()
+
+          if not key:
+              sys.exit("OPENROUTER_API_KEY is missing")
+
+          if topic:
+              topic_instruction = f"Create a video about: {topic}"
+          else:
+              topic_instruction = """
+              Choose a fresh, original, highly engaging video concept.
+              Do not choose a generic facts-list topic.
+              """
+
+          prompt = f"""
+          You are a professional cinematic documentary writer
+          and visual director.
+
+          {topic_instruction}
+
+          Create a complete 5-7 minute video blueprint.
+
+          QUALITY REQUIREMENTS:
+          - Premium cinematic documentary presentation.
+          - Photorealistic visual direction.
+          - Detailed environments, lighting and atmosphere.
+          - Smooth camera movements and varied compositions.
+          - Strong storytelling and suspense.
+          - Natural narration, not robotic or repetitive.
+          - No graphic violence or dangerous real-world instructions.
+
+          FORMAT:
+
+          # VIDEO TITLE
+          # VIDEO DESCRIPTION
+          # OPENING HOOK
+          # COMPLETE NARRATION
+
+          # SCENE BREAKDOWN
+
+          Create 10-14 scenes. For EACH scene include:
+          1. Scene number and estimated duration.
+          2. Exact narration.
+          3. Detailed cinematic visual prompt.
+          4. Camera angle and movement.
+          5. Lighting, atmosphere and environment.
+          6. Background music or sound-effect cues.
+          7. Transition to the next scene.
+
+          # THUMBNAIL CONCEPT
+          # MUSIC DIRECTION
+          # FINAL ENDING AND SUBSCRIBE LINE
+
+          Make the story coherent and original.
+          Do not refer to these instructions.
+          """
+
+          payload = {
+              "model": "openrouter/free",
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": prompt
+                  }
+              ],
+              "max_tokens": 6000,
+              "temperature": 0.8
+          }
+
+          request = urllib.request.Request(
+              "https://openrouter.ai/api/v1/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Authorization": f"Bearer {key}",
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=240) as response:
+                  result = json.loads(response.read())
+
+              content = result["choices"][0]["message"]["content"]
+
+              if not content or not content.strip():
+                  sys.exit("ERROR: Model returned an empty script.")
+
+              with open("output/video_blueprint.md", "w", encoding="utf-8") as f:
+                  f.write(content)
+
+              print("VIDEO BLUEPRINT GENERATED SUCCESSFULLY")
+              print("Characters:", len(content))
+
+          except urllib.error.HTTPError as error:
+              print("API ERROR:", error.code)
+              print(error.read().decode()[:2000])
+              sys.exit(1)
+
+          except Exception as error:
+              print("ERROR:", str(error))
+              sys.exit(1)
+          PY
+
+      - name: Save generated blueprint
+        uses: actions/upload-artifact@v4
+        with:
+          name: cinematic-video-blueprint
+          path: output/video_blueprint.md
+          if-no-files-found: error
+          retention-days: 7
