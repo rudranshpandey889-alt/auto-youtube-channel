@@ -69,8 +69,8 @@ jobs:
 
           prompt = r"""
           Create a premium, high-retention YouTube mini-documentary for a general English-speaking audience.
-          Pick one compelling topic in gaming, technology, AI, science, psychology, history or surprising facts.
-          Make the story specific, factual, conversational and emotionally engaging without inventing facts.
+          Choose ONE highly clickable topic. Priority categories: GTA 6 and gaming news; NVIDIA, AI and technology; Elon Musk and business/innovation; billionaires, money and wealth explained; human behaviour and psychology; surprising brain facts; why time feels faster or life feels different after 2020; discipline, motivation, obsession and attention; how phones affect focus and habits.
+          Prefer timely, widely discussed stories when reliable facts are available; otherwise choose a strong evergreen curiosity topic from these categories. Do NOT choose generic deep-ocean, animal, geography or school-fact topics unless unusually newsworthy. Make the story specific, factual, conversational and emotionally engaging. Never invent quotes, numbers, events or allegations.
           Avoid graphic violence, dangerous instructions, misinformation and copyrighted character likenesses.
           Return ONLY valid JSON with this exact structure:
           {
@@ -87,7 +87,9 @@ jobs:
           - Use natural spoken English, contractions and varied sentence rhythms.
           - Do not repeat the same point in different words.
           - Each visual prompt must describe a distinct composition, camera angle, environment or subject.
-          - Prompts must be suitable for a widescreen cinematic still image; no text, logos or watermarks.
+          - Prompts must be suitable for a widescreen cinematic visual; no text, logos or watermarks.
+          - Every scene must also include "stock_query": a concise 2-5 word search phrase describing real-world footage or imagery for that scene.
+          - Prefer visual variety: people, real places, technology, city scenes, devices, workplaces, cinematic close-ups and illustrative metaphors.
           - End with a satisfying conclusion and a natural call to action.
           """
 
@@ -143,6 +145,108 @@ jobs:
           (OUT / "story.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
           print("VIDEO TOPIC:", story["title"])
 
+          COMMONS_ATTRIBUTIONS = []
+          COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+
+          def clean_html(value):
+              value = re.sub(r"<[^>]+>", " ", str(value or ""))
+              return re.sub(r"\s+", " ", value).strip()
+
+          def find_commons_media(query, index):
+              """Try one Commons video search, then one image search; require reusable licences."""
+              query = re.sub(r"[^a-zA-Z0-9 ]", " ", str(query or ""))
+              query = " ".join(query.split()[:6])
+              if len(query) < 3:
+                  return None
+              session = requests.Session()
+              headers = {"User-Agent": "AutoYTVideoBot/1.0 (personal YouTube video project; contact via GitHub repository)"}
+              for file_kind in ("video", "bitmap"):
+                  try:
+                      params = {
+                          "action": "query", "format": "json", "generator": "search",
+                          "gsrsearch": f"filetype:{file_kind} {query}",
+                          "gsrnamespace": 6, "gsrlimit": 6,
+                          "prop": "imageinfo", "iiprop": "url|extmetadata|mime"
+                      }
+                      response = session.get(COMMONS_API, params=params, headers=headers, timeout=35)
+                      response.raise_for_status()
+                      pages = (response.json().get("query") or {}).get("pages") or {}
+                      for page in pages.values():
+                          infos = page.get("imageinfo") or []
+                          if not infos:
+                              continue
+                          info = infos[0]
+                          mime = str(info.get("mime") or "")
+                          is_video = mime.startswith("video/")
+                          if file_kind == "video" and not is_video:
+                              continue
+                          if file_kind == "bitmap" and not mime.startswith("image/"):
+                              continue
+                          meta = info.get("extmetadata") or {}
+                          license_name = clean_html((meta.get("LicenseShortName") or {}).get("value", ""))
+                          license_lower = license_name.lower()
+                          allowed = (
+                              "cc0" in license_lower or "public domain" in license_lower
+                              or (license_lower.startswith("cc by ") and "sa" not in license_lower)
+                          )
+                          if not allowed:
+                              continue
+                          media_url = info.get("url")
+                          if not media_url:
+                              continue
+                          suffix = Path(media_url.split("?")[0]).suffix.lower()
+                          if suffix not in {".mp4", ".webm", ".ogv", ".ogg", ".jpg", ".jpeg", ".png", ".gif"}:
+                              continue
+                          target = SCENES_DIR / f"commons_{index:02}{suffix}"
+                          try:
+                              with session.get(media_url, headers=headers, stream=True, timeout=90) as download:
+                                  download.raise_for_status()
+                                  total = 0
+                                  with target.open("wb") as handle:
+                                      for chunk in download.iter_content(chunk_size=1024 * 256):
+                                          if not chunk:
+                                              continue
+                                          total += len(chunk)
+                                          if total > 60 * 1024 * 1024:
+                                              raise RuntimeError("Commons file exceeded 60 MB safety limit")
+                                          handle.write(chunk)
+                              if target.stat().st_size < 20_000:
+                                  raise RuntimeError("Commons media file was too small")
+                              if is_video:
+                                  probe = subprocess.run(
+                                      ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                                       "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(target)],
+                                      capture_output=True, text=True
+                                  )
+                                  if probe.returncode != 0 or "video" not in probe.stdout:
+                                      raise RuntimeError("Downloaded Commons file is not a readable video")
+                              else:
+                                  image = Image.open(target).convert("RGB")
+                                  scale = max(WIDTH / image.width, HEIGHT / image.height)
+                                  image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
+                                  left, top = (image.width - WIDTH) // 2, (image.height - HEIGHT) // 2
+                                  image = image.crop((left, top, left + WIDTH, top + HEIGHT))
+                                  converted = SCENES_DIR / f"commons_{index:02}.jpg"
+                                  image.save(converted, quality=92, optimize=True)
+                                  target.unlink(missing_ok=True)
+                                  target = converted
+                              artist = clean_html((meta.get("Artist") or {}).get("value", "Unknown creator"))
+                              source = info.get("descriptionurl") or page.get("canonicalurl") or media_url
+                              COMMONS_ATTRIBUTIONS.append(
+                                  f"{page.get('title', 'Wikimedia Commons file')} — {artist}; {license_name}; {source}"
+                              )
+                              print(f"Using Wikimedia Commons {'video' if is_video else 'image'} for scene {index}: {page.get('title')}")
+                              time.sleep(1.2)
+                              return {"type": "video" if is_video else "image", "path": target}
+                          except Exception as exc:
+                              target.unlink(missing_ok=True)
+                              print("Skipping Commons candidate:", repr(exc))
+                      time.sleep(1.2)
+                  except Exception as exc:
+                      print("Wikimedia Commons search failed:", repr(exc))
+                      time.sleep(2)
+              return None
+
           def generate_image(scene_prompt, index):
               endpoint = (
                   "https://api.cloudflare.com/client/v4/accounts/" + CF_ACCOUNT
@@ -156,7 +260,7 @@ jobs:
               last_error = None
               for attempt in range(1, 4):
                   try:
-                      print(f"Image {index}/24, attempt {attempt}/3")
+                      print(f"AI image {index}/24, attempt {attempt}/3")
                       response = requests.post(
                           endpoint,
                           headers={"Authorization": "Bearer " + CF_TOKEN},
@@ -237,7 +341,11 @@ jobs:
 
           for index, scene in enumerate(story["scenes"], 1):
               print(f"\n--- BUILDING SCENE {index}/24 ---")
-              image_path = generate_image(scene["visual"], index)
+              media = find_commons_media(scene.get("stock_query") or scene["visual"], index) if index % 2 == 0 else None
+              if media is None:
+                  media = {"type": "image", "path": generate_image(scene["visual"], index)}
+              else:
+                  print("Commons media selected:", media["type"], media["path"].name)
               voice_path = SCENES_DIR / f"voice_{index:02}.mp3"
               make_voice(scene["narration"], voice_path, index)
               voice_duration = duration(voice_path)
@@ -256,27 +364,42 @@ jobs:
 
               clip_path = SCENES_DIR / f"clip_{index:02}.mp4"
               fade_out = max(0.1, clip_duration - 0.30)
-              # Slow zoom plus a gentle alternating pan keeps still images moving.
-              if index % 2:
-                  x_expr = "iw/2-(iw/zoom/2)+8*sin(on/45)"
+              if media["type"] == "video":
+                  vf = (
+                      f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                      f"crop={WIDTH}:{HEIGHT},fps={FPS},"
+                      "fade=t=in:st=0:d=0.25,"
+                      f"fade=t=out:st={fade_out:.3f}:d=0.30,format=yuv420p"
+                  )
+                  run([
+                      "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(media["path"]),
+                      "-i", str(voice_path), "-map", "0:v:0", "-map", "1:a:0",
+                      "-vf", vf, "-af", "apad", "-t", f"{clip_duration:.3f}",
+                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                      "-pix_fmt", "yuv420p", "-r", str(FPS),
+                      "-c:a", "aac", "-b:a", "160k", "-shortest", str(clip_path)
+                  ])
               else:
-                  x_expr = "iw/2-(iw/zoom/2)-8*sin(on/45)"
-              vf = (
-                  "zoompan=z='min(zoom+0.00065,1.12)':"
-                  f"x='{x_expr}':y='ih/2-(ih/zoom/2)':"
-                  f"d=1:s={WIDTH}x{HEIGHT}:fps={FPS},"
-                  "fade=t=in:st=0:d=0.25,"
-                  f"fade=t=out:st={fade_out:.3f}:d=0.30,format=yuv420p"
-              )
-              run([
-                  "ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS),
-                  "-i", str(image_path), "-i", str(voice_path),
-                  "-vf", vf, "-af", "apad",
-                  "-t", f"{clip_duration:.3f}",
-                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-                  "-pix_fmt", "yuv420p", "-r", str(FPS),
-                  "-c:a", "aac", "-b:a", "160k", "-shortest", str(clip_path)
-              ])
+                  if index % 2:
+                      x_expr = "iw/2-(iw/zoom/2)+8*sin(on/45)"
+                  else:
+                      x_expr = "iw/2-(iw/zoom/2)-8*sin(on/45)"
+                  vf = (
+                      "zoompan=z='min(zoom+0.00065,1.12)':"
+                      f"x='{x_expr}':y='ih/2-(ih/zoom/2)':"
+                      f"d=1:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                      "fade=t=in:st=0:d=0.25,"
+                      f"fade=t=out:st={fade_out:.3f}:d=0.30,format=yuv420p"
+                  )
+                  run([
+                      "ffmpeg", "-y", "-loop", "1", "-framerate", str(FPS),
+                      "-i", str(media["path"]), "-i", str(voice_path),
+                      "-vf", vf, "-af", "apad",
+                      "-t", f"{clip_duration:.3f}",
+                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+                      "-pix_fmt", "yuv420p", "-r", str(FPS),
+                      "-c:a", "aac", "-b:a", "160k", "-shortest", str(clip_path)
+                  ])
               clip_paths.append(clip_path)
               timeline += clip_duration
 
@@ -338,7 +461,7 @@ jobs:
           tags = story.get("tags") or []
           metadata = {
               "title": story["title"][:100],
-              "description": description[:4800] + "\n\nCreated with AutoYT.",
+              "description": (description[:3800] + "\n\nCreated with AutoYT." + (("\n\nWikimedia Commons media credits:\n" + "\n".join(dict.fromkeys(COMMONS_ATTRIBUTIONS))) if COMMONS_ATTRIBUTIONS else ""))[:4900],
               "tags": [str(tag)[:30] for tag in tags[:15]],
               "categoryId": "28"
           }
